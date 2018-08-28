@@ -1,0 +1,47 @@
+---
+- hosts: localhost
+  tasks:
+  - name: pci
+    shell: lspci | grep -i vga
+    register: lspci
+
+  - name: Get Kernel version
+    shell: uname -r | egrep '^[0-9]*\.[0-9]*' -o
+    register: kernel_shell_output
+
+  - name: Kernel update on a Debian/Ubuntu
+    apt:
+      name: linux-generic-hwe-16.04
+      install_recommends: yes
+    register: kernel_update
+    when: kernel_shell_output.stdout is version('4.10', '<')
+
+  - name: Add enable_gvt flag in the grub config file
+    lineinfile:
+      state: present
+      dest: /etc/default/grub
+      backrefs: yes
+      regexp: '^(GRUB_CMDLINE_LINUX=\"(?!.*i915\.enable_gvt)[^\"]*)(\".*)'
+      line: '\1 i915.enable_gvt=1\2'
+    register: grub_config
+    when: lspci.stdout|lower is search("intel")
+
+  - name: Update GRUB
+    command: update-grub
+    failed_when: ('error' in grub_update.stderr)
+    register: grub_update
+    when: grub_config.changed
+
+  - name: Reboot node if kernel updated and requested by the system
+    shell: sleep 10 && /sbin/shutdown -r now 'Rebooting node to update system libs/kernel as needed'
+    args:
+      removes: /var/run/reboot-required
+    async: 300
+    poll: 0
+    ignore_errors: true
+    when: kernel_update.changed or grub_config.changed
+
+  - name: Wait for system to become reachable again
+    wait_for_connection:
+      delay: 60
+      timeout: 300
